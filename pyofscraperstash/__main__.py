@@ -71,7 +71,7 @@ async def aiter_list(iterable: list) -> t.AsyncIterator[list]:
 
 def signal_handler(sig, frame):
     print("Ctrl+C detected. Stopping the thread.")
-    exit(130)
+    sys.exit(130)
 
 
 pprint = PrettyPrinter(
@@ -94,6 +94,33 @@ def unmark_element(element, stream=None):
 Markdown.output_formats["plain"] = unmark_element
 __md = Markdown(output_format="plain")
 __md.stripTopLevelTags = False
+
+blank_config = {
+    "sanity_check": False,
+    "max_title_length": 64,
+    "log_level": "INFO",
+    "models": [],
+    "after": None,
+    "verbose": False,
+    "stashapp": {
+        "scheme": "http",
+        "host": "localhost",
+        "port": 9999,
+        "apikey": "",
+    },
+    "of_scraper": {
+        "folders": {
+            "save_location": "",
+            "stash_location": "",
+            "dir_format": "",
+            "metadata_format": "",
+        },
+        "file_format": "",
+    },
+    "labels": {
+        "tag_message": None,
+    },
+}
 
 
 def update_progress_bar(future: asyncio.Future, bar: progressbar) -> None:
@@ -124,19 +151,56 @@ def deep_get(
     )
 
 
-def load_config(config_file: str) -> None:
-    global runtime_settings
-    file_logger.debug(f"Loading config file: {config_file}")
+def initialize_config(config_file: str) -> None:
+    _, ext = os.path.splitext(config_file)
+    with open(config_file, "w", encoding="utf-8") as file:
+        if ext.lower() == ".json":
+            json.dump(blank_config, file, indent=4)
+        else:
+            yaml.safe_dump(blank_config, file)
+
+
+def read_config(config_file: str) -> dict:
     _, ext = os.path.splitext(config_file)
     with open(config_file) as file:
         if ext.lower() == ".json":
             data = json.load(file)
-        elif ext.lower() == ".yaml" or ext.lower() == ".yml":
-            data = yaml.safe_load(file)
         else:
-            raise ValueError(
-                f"Unsupported file extension {ext}. Please use .json or .yaml/.yml"
-            )
+            data = yaml.safe_load(file)
+    return data
+
+
+def write_config(config_file: str, data: dict) -> None:
+    _, ext = os.path.splitext(config_file)
+    with open(config_file, "w", encoding="utf-8") as file:
+        if ext.lower() == ".json":
+            json.dump(data, file, indent=4)
+        else:
+            yaml.safe_dump(data, file)
+
+
+def load_config(config_file: str) -> None:
+    global runtime_settings
+    file_logger.debug(f"Loading config file: {config_file}")
+    _, ext = os.path.splitext(config_file)
+    if ext.lower() not in [".json", ".yaml", ".yml"]:
+        raise ValueError(
+            f"Unsupported file extension {ext}. Please use .json or .yaml/.yml"
+        )
+    if not os.path.exists(config_file):
+        file_logger.warning(f"Config file {config_file} not found.")
+        initialize_config(config_file)
+        exit
+
+    data = read_config(config_file)
+
+    if data["stashapp"].get("api_key", None) is not None:
+        data["stashapp"]["apikey"] = data["stashapp"]["api_key"]
+        del data["stashapp"]["api_key"]
+    data.update({k: v for k, v in blank_config.items() if k not in data})
+
+    write_config(config_file, data)
+
     runtime_settings = data
     runtime_settings["config_file"] = config_file
 
@@ -150,9 +214,7 @@ async def sleep(seconds: int, printDelay: bool = True) -> None:
         await asyncio.sleep(1)
 
 
-def format_directory(dir_type: str | None = None, **vars) -> str:
-    global runtime_settings
-    return_string: str = ""
+def get_path_key(dir_type: str | None = None) -> str:
     if dir_type is None:
         raise ValueError("dir_type is required")
     if dir_type not in [
@@ -163,16 +225,22 @@ def format_directory(dir_type: str | None = None, **vars) -> str:
         "dir_format_stash",
     ]:
         raise ValueError(f"Unsupported dir_type: {dir_type}")
-    path_key = (
+    return (
         f"of_scraper.folders.{dir_type}"
         if dir_type != "dir_format_stash"
         else "of_scraper.folders.dir_format"
     )
+
+
+def format_directory(dir_type: str | None = None, **vars) -> str:
+    global runtime_settings
+    return_string: str = ""
+    path_key = get_path_key(dir_type)
     try:
         return_string = deep_get(runtime_settings, path_key, ValueError)
     except ValueError as e:
         file_logger.warning(f"Error: {e}")
-        exit(1)
+        sys.exit(1)
     if "metadata_format" in dir_type or "dir_format" in dir_type:
         save_or_stash = (
             "save_location"
@@ -230,6 +298,13 @@ def parse_media_row_to_studio_code(row: dict = {}) -> str:
         return full_filename
 
 
+def filter_dbs_by_date(db_files: list[str], mod_date: str | None = None) -> set[str]:
+    if not mod_date:
+        return set(db_files)
+    mod_time = dateutil.parser.parse(mod_date).timestamp()
+    return {file for file in db_files if os.path.getmtime(file) > mod_time}
+
+
 async def load_db_into_memory(db_file: str) -> aiosqlite.Connection:
     # Create a temporary directory to store the local copy of the database
     file_logger.debug(f"Loading {db_file} into memory")
@@ -260,6 +335,9 @@ async def load_db_into_memory(db_file: str) -> aiosqlite.Connection:
         file_logger.warning(f"SQL Error: {db_file}")
         file_logger.exception(e, exc_info=False, stack_info=False)
         Raise(Exception(f"SQL Error: {db_file}"))
+    except Exception as e:
+        file_logger.error(f"Error: {e}")
+        raise e
 
 
 async def get_usernames_from_db(conn: aiosqlite.Connection, db_file: str) -> str:
@@ -285,62 +363,58 @@ async def get_usernames_from_db(conn: aiosqlite.Connection, db_file: str) -> str
         return db_file.split(os.sep)[-3]
 
 
-async def get_metadata_db_files(
-    models: list[str] | None = None,
+async def get_db_file_for_model(
+    model: str, mod_date: str | None = None
+) -> list[tuple[str, aiosqlite.Connection]]:
+    globList = glob(
+        os.path.join(
+            format_directory(
+                dir_type="metadata_format",
+                model_username=model,
+                missing_values="**",
+            ),
+            "user_data.db",
+        ),
+        recursive=True,
+    )
+    file_logger.debug("%s", pformat(f"globList: {globList}"))
+    if not globList:
+        file_logger.info(f"No metadata database files found for {model}")
+        return []
+    db_files = filter_dbs_by_date(globList, mod_date)
+    if not db_files:
+        file_logger.info(f"All database files for {model} filtered out by date")
+        return []
+    return await load_database(db_files, model)
+
+
+async def get_all_db_files(
     mod_date: str | None = None,
 ) -> list[tuple[str, aiosqlite.Connection]]:
-    global runtime_settings
-    file_logger.debug("%s", pformat(f"Models: {models}"))
-    db_set: set[str] = set()
-    if models:
-        logger.info(f"Models specified: {models}")
-        for model in models:
-            file_logger.debug("%s", pformat(f"Model: {model}"))
-            globList = glob(
-                os.path.join(
-                    format_directory(
-                        dir_type="metadata_format",
-                        model_username=model,
-                        missing_values="**",
-                    ),
-                    "user_data.db",
-                ),
-                recursive=True,
-            )
-            file_logger.log(5, "%s", pformat(f"globList: {globList}"))
-            if not (len(globList) > 0):
-                file_logger.info(f"No metadata database files found for {model}")
-                continue
-            if mod_date:
-                for db_file in globList:
-                    if (
-                        os.path.getmtime(db_file)
-                        > dateutil.parser.parse(mod_date).timestamp()
-                    ):
-                        db_set.add(db_file)
-            db_set.update(globList)
-    else:
-        logger.info("Finding all models in metadata directory")
-        if runtime_settings["verbose"]:
-            file_logger.info("No models specified")
-        db_set_holder = set(
-            glob(
-                os.path.join(
-                    format_directory(dir_type="metadata_format", missing_values="**"),
-                    "user_data.db",
-                ),
-                recursive=True,
-            )
-        )
-        if mod_date:
-            for db_file in db_set_holder:
-                if (
-                    os.path.getmtime(db_file)
-                    > dateutil.parser.parse(mod_date).timestamp()
-                ):
-                    db_set.add(db_file)
-        else:
-            db_set.update(db_set_holder)
+    globList = glob(
+        os.path.join(
+            format_directory(
+                dir_type="metadata_format",
+                missing_values="**",
+            ),
+            "user_data.db",
+        ),
+        recursive=True,
+    )
+    file_logger.debug("%s", pformat(f"globList: {globList}"))
+    if not globList:
+        file_logger.info("No metadata database files found")
+        return []
+    db_files = filter_dbs_by_date(globList, mod_date)
+    if not db_files:
+        file_logger.info("All database files filtered out by date")
+        return []
+    return await load_database(db_files)
+
+
+async def load_database(
+    db_set: set[str], model: str | None = None
+) -> list[tuple[str, aiosqlite.Connection]]:
     aiosqlite.register_converter("timestamp", convert_datetime)
     aiosqlite.register_converter("created_at", convert_datetime)
     return_list = []
@@ -361,9 +435,27 @@ async def get_metadata_db_files(
             logger.error(f"Connection is None for {db_file}")
             continue
         conn.row_factory = aiosqlite.Row
-        username = await get_usernames_from_db(conn, db_file)
+        username = model if model else await get_usernames_from_db(conn, db_file)
         return_list.append((username, conn))
     return return_list
+
+
+async def get_metadata_db_files(
+    models: list[str] | None = None,
+    mod_date: str | None = None,
+) -> list[tuple[str, aiosqlite.Connection]]:
+    global runtime_settings
+    file_logger.debug("%s", pformat(f"Models: {models}"))
+    if models:
+        logger.info(f"Models specified: {models}")
+        tasks = [get_db_file_for_model(model, mod_date) for model in models]
+        results = await asyncio.gather(*tasks)
+        return [item for sublist in results for item in sublist]
+    else:
+        logger.info("Finding all models in metadata directory")
+        if runtime_settings["verbose"]:
+            file_logger.info("No models specified")
+        return await get_all_db_files(mod_date)
 
 
 async def create_performer(
@@ -732,14 +824,7 @@ def process_db_row_image_files(
     if sleep:
         time_to_sleep = rng.uniform(0, 3)
         time.sleep(time_to_sleep)
-    stash = StashInterface(
-        {
-            "scheme": runtime_settings["stashapp"]["scheme"],
-            "host": runtime_settings["stashapp"]["host"],
-            "port": runtime_settings["stashapp"]["port"],
-            "ApiKey": runtime_settings["stashapp"]["api_key"],
-        }
-    )
+    stash = StashInterface(runtime_settings["stashapp"])
     file_logger.log(5, "%s", pformat(f"Rows: {rows}"))
     if len(rows) == 0:
         return []
@@ -912,14 +997,7 @@ def process_db_row_scene_files(
     if sleep:
         time_to_sleep = rng.uniform(0, 3)
         time.sleep(time_to_sleep)
-    stash = StashInterface(
-        {
-            "scheme": runtime_settings["stashapp"]["scheme"],
-            "host": runtime_settings["stashapp"]["host"],
-            "port": runtime_settings["stashapp"]["port"],
-            "ApiKey": runtime_settings["stashapp"]["api_key"],
-        }
-    )
+    stash = StashInterface(runtime_settings["stashapp"])
     file_logger.log(5, "%s", pformat(f"Count of rows in this loop: {len(rows)}"))
     file_logger.log(5, "%s", pformat(f"Rows: {rows}"))
     if len(rows) == 0:
@@ -1746,8 +1824,46 @@ def parse_arguments() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.config_file:
         parser.print_help()
-        exit(1)
+        sys.exit(1)
     return args
+
+
+async def generate_metadata(stash: StashInterface, await_loop: bool = False) -> None:
+    gen_job = stash.metadata_generate(
+        {
+            "covers": True,
+            "sprites": True,
+            "previews": True,
+            "imagePreviews": True,
+            "previewOptions": {
+                "previewSegments": 12,
+                "previewSegmentDuration": 0.75,
+                "previewExcludeStart": "0",
+                "previewExcludeEnd": "0",
+                "previewPreset": "slow",
+            },
+            "markers": True,
+            "markerImagePreviews": True,
+            "markerScreenshots": True,
+            "transcodes": False,
+            "phashes": True,
+            "interactiveHeatmapsSpeeds": True,
+            "imageThumbnails": True,
+            "clipPreviews": True,
+            "overwrite": False,
+        }
+    )
+    logger.info(f"Metadata generation job: {gen_job}")
+    running = await_loop
+    while running:
+        job_status = stash.find_job(gen_job)
+        logger.info(f"Metadata generation status: {job_status}")
+        file_logger.info(f"Metadata generation status: {job_status}")
+        if job_status["status"] in ["FINISHED", "FAILED", "CANCELLED"]:
+            running = False
+            break
+        else:
+            await asyncio.sleep(5)
 
 
 async def main() -> None:
@@ -1774,25 +1890,28 @@ async def main() -> None:
         logger.info(f"Configuration file: {args.config_file}")
         logger.info(pformat(runtime_settings))
     logger.info("Loading models...")
+    signal.signal(signal.SIGINT, signal_handler)
     metadata_db_sets = await get_metadata_db_files(
         models=runtime_settings.get("models", {}),
         mod_date=runtime_settings.get("metadata_modification_date", None),
     )
-    stash = StashInterface(
-        {
-            "scheme": runtime_settings["stashapp"]["scheme"],
-            "host": runtime_settings["stashapp"]["host"],
-            "port": runtime_settings["stashapp"]["port"],
-            "ApiKey": runtime_settings["stashapp"]["api_key"],
-        }
-    )
+    file_logger.debug("%s", pformat(metadata_db_sets))
     try:
-        if len(metadata_db_sets) == 0:
-            logger.error("No metadata database files found")
-            exit(1)
-        metadata_db_files = [db_file for _, db_file in metadata_db_sets]
-        metadata_performers = [performer for performer, _ in metadata_db_sets]
-        logger.info(f"Found {len(metadata_db_files)} metadata database files")
+        stash = StashInterface(runtime_settings["stashapp"])
+    except SystemExit:
+        logger.error("Failed to connect to Stash")
+        loop = asyncio.get_running_loop()
+        loop.stop()
+        sys.exit(1)
+    if len(metadata_db_sets) == 0:
+        logger.error("No metadata database files found")
+        loop = asyncio.get_running_loop()
+        loop.stop()
+        sys.exit(1)
+    metadata_db_files = [db_file for _, db_file in metadata_db_sets]
+    metadata_performers = [performer for performer, _ in metadata_db_sets]
+    logger.info(f"Found {len(metadata_db_files)} metadata database files")
+    try:
         stash_performers = await get_stash_performers(metadata_performers, stash)
         file_logger.debug("%s", pformat(stash_performers))
         if runtime_settings["sanity_check"]:
@@ -1808,8 +1927,7 @@ async def main() -> None:
                 logger.warning("Script interrupted. Exiting...")
                 loop = asyncio.get_running_loop()
                 loop.stop()
-                exit(1)
-        signal.signal(signal.SIGINT, signal_handler)
+                sys.exit(1)
         stash_studios = {}
         async for performer in aiter_list(metadata_performers):
             stash_studios[performer] = await get_stash_studio(performer, stash)
@@ -1855,41 +1973,8 @@ async def main() -> None:
                     username=username,
                     stash=stash,
                 )
-        gen_job = stash.metadata_generate(
-            {
-                "covers": True,
-                "sprites": True,
-                "previews": True,
-                "imagePreviews": True,
-                "previewOptions": {
-                    "previewSegments": 12,
-                    "previewSegmentDuration": 0.75,
-                    "previewExcludeStart": "0",
-                    "previewExcludeEnd": "0",
-                    "previewPreset": "slow",
-                },
-                "markers": True,
-                "markerImagePreviews": True,
-                "markerScreenshots": True,
-                "transcodes": False,
-                "phashes": True,
-                "interactiveHeatmapsSpeeds": True,
-                "imageThumbnails": True,
-                "clipPreviews": True,
-                "overwrite": False,
-            }
-        )
-        logger.info(f"Metadata generation job: {gen_job}")
-        # running = True
-        # while running:
-        #     job_status = stash.find_job(gen_job)
-        #     logger.info(f"Metadata generation status: {job_status}")
-        #     file_logger.info(f"Metadata generation status: {job_status}")
-        #     if job_status["status"] in ["FINISHED", "FAILED", "CANCELLED"]:
-        #         running = False
-        #         break
-        #     else:
-        #         await asyncio.sleep(5)
+        if runtime_settings.get("metadata_generation", False):
+            await generate_metadata(stash=stash, await_loop=True)
     except Exception as e:
         logger.exception(e, exc_info=True, stack_info=True)
         return
