@@ -255,7 +255,7 @@ def process_post_user() -> None:
     global runtime_settings
     global args
     with open(args[2]) as file:
-        provided_data = json.load(file)
+        provided_data: dict = json.load(file)
     args_logger.info(pformat(f"Provided Data: \n{pformat(provided_data)}"))
     username = provided_data["username"]
     user_id = provided_data["model_id"]
@@ -271,12 +271,13 @@ def process_post_user() -> None:
     )
     scan_user(stash, username)
     file_logger.info("Beginning of media looping")
-    media = provided_data.get("media", [])
-    posts = provided_data.get("posts", [])
+    media: dict = provided_data.get("media", [])
+    posts: dict = provided_data.get("posts", [])
     if len(media) > 0:
         file_logger.info(f"Media Count: {len(media)}")
         process_media_and_posts(stash, media, posts)
-    contents = media + posts
+    contents: dict = media + posts
+    content: dict
     for content in contents:
         if (
             content.get("responseType", None) == "profile"
@@ -298,6 +299,7 @@ def process_post_user() -> None:
             file_logger.info(f"Media in dict: {len(content.get('media', []))}\n\n")
             continue
         file_logger.info(f"Media Length: {len(content.get('media', []))}")
+        media: dict
         for media in content.get("media", []):
             if media.get("type", None) == "video":
                 filename: str = ""
@@ -319,7 +321,7 @@ def process_post_user() -> None:
                     else:
                         file_logger.info("No source available")
                 if media.get("files", None) is not None and filename == "":
-                    file = media.get("files", {})
+                    file: dict = media.get("files", {})
                     file_logger.info(pformat(f"File: {file}"))
                     if file.get("drm", False):
                         file_logger.info("File is DRM protected")
@@ -403,15 +405,15 @@ def process_post_loop() -> None:
     )
     for user in provided_data["users"]:
         file_logger.info("Beginning of user scan")
-        file_logger.info(pformat(f"User: {user}"))
+        file_logger.info(pformat(f"User id: {user}"))
         userdata = provided_data["users"].get(user, {})
         username: str = userdata.get("username", "Missing")
         user_id: int = user
-        print(f"Username: {username}")
-        print(f"User ID: {user_id}")
+        file_logger.info(f"Username: {username}")
+        file_logger.info(f"User ID: {user_id}")
         scan_user(stash, username)
-        print(f"End of user {username}")
-        print(
+        file_logger.info(f"End of user {username}")
+        file_logger.info(
             f"Expiration: {userdata.get('subscribedByData', {}).get('expiredAt', 'N/A')}"
         )
     file_logger.info("End of users scan")

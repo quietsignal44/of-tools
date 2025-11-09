@@ -8,18 +8,18 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-stashapp-tools = "^0.2.46"
+stashapp-tools = "^0.2.55"
 PyYAML = "^6.0.1"
-python-dateutil = "^2.9.0.post0"
+python-dateutil = "^2.9"
 
 [tool.poetry.group.dev.dependencies]
-black = "^24.4.2"
-isort = "^5.13.2"
+black = "^25.1.0"
+isort = "^6.0.0"
 mypy = "^1.10.1"
 pylint = "^3.2.5"
 bandit = "^1.7.9"
 flake8 = "^7.1.0"
-pre-commit = "^3.8.0"
+pre-commit = "^4.0"
 
 
 [build-system]

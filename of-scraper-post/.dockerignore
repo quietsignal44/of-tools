@@ -1,6 +1,6 @@
 .git
 .gitignore
-.flake
+.flake*
 .pre-commit*
 .venv
 *.log
@@ -8,3 +8,4 @@ README.md
 docker-bake.hcl
 config.yml
 Dockerfile
+provided_data.py
