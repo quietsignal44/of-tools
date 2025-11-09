@@ -54,3 +54,5 @@ target/
 
 
 debug*.log
+
+config.yml
