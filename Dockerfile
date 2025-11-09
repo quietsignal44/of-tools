@@ -15,7 +15,7 @@ RUN poetry export -f requirements.txt -o requirements.txt --ansi --without-hashe
 
 RUN /venv/bin/pip --no-cache-dir install -r requirements.txt
 
-RUN rm requirements.txt
+RUN rm requirements.txt && rm -f pyproject.toml pyproject.lock poetry.lock
 
 ENV PATH="/venv/bin:${PATH}" \
     VIRTUAL_ENV="/venv"
