@@ -28,6 +28,9 @@ from string import Formatter
 from typing import Any
 from urllib.parse import urlparse
 
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 import aiosqlite
 import dateutil.parser  # type: ignore[unused-ignore]
 import yaml  # type: ignore[unused-ignore]
@@ -74,8 +77,12 @@ def signal_handler(sig, frame):
     sys.exit(130)
 
 
+try:
+    _terminal_width = os.get_terminal_size().columns - 5
+except OSError:
+    _terminal_width = 120  # Default width when no terminal available
 pprint = PrettyPrinter(
-    indent=4, depth=2, compact=True, width=(os.get_terminal_size().columns - 5)
+    indent=4, depth=2, compact=True, width=_terminal_width
 ).pprint
 
 
@@ -268,7 +275,7 @@ def parse_media_row_to_studio_code(row: dict = {}) -> str:
     if row == {}:
         file_logger.error(f"row cannot be empty: {row}")
         raise ValueError("row cannot be empty")
-    if row["link"]:
+    if False and row["link"]:  # PREFER FILENAME MATCH
         url = row["link"]
         converted_url = urlparse(url)
         converted_path = converted_url.path
@@ -355,7 +362,7 @@ async def get_usernames_from_db(conn: aiosqlite.Connection, db_file: str) -> str
             async with conn.execute("select username from profiles limit 1;") as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    return f"{row["username"]}"
+                    return row["username"]
                 return db_file.split(os.sep)[-3]
     except sqlite3.Error as e:
         file_logger.warning(f"SQL Error: {db_file}")
@@ -553,11 +560,11 @@ async def check_studio_description(
     text_files = glob(os.path.join(profile_text_path, "*.txt"), recursive=True)
     file_logger.debug("%s", pformat(f"Text files: {text_files}"))
     if studio["details"] is None or studio["details"] == "":
-        decide = ""
+        decide = "y"  # AUTO-YES
         pprint(f"Studio {studio['name']} has no description (details field in Stash).")
         if len(text_files) > 0:
-            decide = ""
-            while decide not in ["y", "n"]:
+            decide = "y"  # AUTO-YES
+            if False:  # SKIP PROMPT
                 decide = input(
                     f"Description found in {text_files[0]}. Do you want to add it? (y/n): "
                 )
@@ -572,8 +579,8 @@ async def check_studio_description(
                     temp_studio["details"] = details
                     return client.update_studio(temp_studio)
         if decide == "n" or decide == "":
-            decide = ""
-            while decide not in ["y", "n"]:
+            decide = "y"  # AUTO-YES
+            if False:  # SKIP PROMPT
                 decide = input("Do you want to add one? (y/n): ")
                 if decide == "y":
                     temp_studio = {"id": studio["id"]}
@@ -673,8 +680,8 @@ async def get_stash_performers(  # noqa: C901
                 gql_performers[performer] = gql_performers[performer][0]
         else:
             if gql_performers[performer] is None:
-                decide = ""
-                while decide not in ["y", "n"]:
+                decide = "y"  # AUTO-YES
+                if False:  # SKIP PROMPT
                     decide = input(
                         f"Performer {performer} not found in Stash. Do you want to create a new performer? (y/n): "
                     )
@@ -693,8 +700,8 @@ async def get_stash_performers(  # noqa: C901
     for performer in performers:
         if isinstance(gql_performers.get(performer, None), dict):
             if "default=true" in gql_performers[performer]["image_path"]:
-                decide = ""
-                while decide not in ["y", "n"]:
+                decide = "y"  # AUTO-YES
+                if False:  # SKIP PROMPT
                     decide = input(
                         f"Performer {performer} has no avatar. Do you want to upload one? (y/n): "
                     )
@@ -747,7 +754,7 @@ async def get_stash_studio(performer: str, client: StashInterface = None) -> dic
     )
     file_logger.debug("%s", pformat(f"Result: {result}"))
     if result[0] > 1:
-        decide = ""
+        decide = "y"  # AUTO-YES
         while decide not in [studio["id"] for studio in result[1]]:
             print(f"Multiple studios found for performer {performer}.")
             for studio in result[1]:
@@ -757,8 +764,8 @@ async def get_stash_studio(performer: str, client: StashInterface = None) -> dic
                 if studio["id"] == decide:
                     return studio
     elif result[0] == 0:
-        decide = ""
-        while decide not in ["y", "n"]:
+        decide = "y"  # AUTO-YES
+        if False:  # SKIP PROMPT
             decide = input(
                 f"No studios found for performer {performer}. Do you want to create one? (y/n): "
             )
@@ -774,12 +781,12 @@ async def verify_studio_url(
     file_logger.debug(f"Verifying URL for studio {studio}")
     if studio is None:
         return None
-    if studio["url"] != f"https://onlyfans.com/{performer}":
+    if studio.get("url") != f"https://onlyfans.com/{performer}":
         print(f"Studio {studio['name']} has an incorrect URL")
-        print(f"Current URL: {studio['url']}")
+        print(f"Current URL: {studio.get('url', '')}")
         print(f"Correct URL: https://onlyfans.com/{performer}")
-        decide = ""
-        while decide not in ["y", "n"]:
+        decide = "y"  # AUTO-YES
+        if False:  # SKIP PROMPT
             decide = input(f"Do you want to update the URL for {performer}? (y/n): ")
         if decide == "y":
             variables = {
@@ -824,7 +831,7 @@ def process_db_row_image_files(
     if sleep:
         time_to_sleep = rng.uniform(0, 3)
         time.sleep(time_to_sleep)
-    stash = StashInterface(runtime_settings["stashapp"])
+    stash = StashInterface(runtime_settings["stashapp"], verify_ssl=False)
     file_logger.log(5, "%s", pformat(f"Rows: {rows}"))
     if len(rows) == 0:
         return []
@@ -957,37 +964,28 @@ def remove_markdown_in_title(title):
 
 def format_title(title, username, date, scene_index, scene_count):
     """
-    Format a post title based on various conditions.
+    Format a post title. Always includes username and date as prefix.
+    Format: "{username} - {date} - {text} {index}/{count}"
     """
+    prefix = f"{username} - {date}"
+    scene_info = f" {scene_index + 1}/{scene_count}" if scene_count > 1 else ""
+
     if len(title) == 0:
-        scene_info = f" ({scene_index})" if scene_index > 0 else ""
-        return f"{username} - {date}{scene_info}"
+        return f"{prefix}{scene_info}"
 
     title = sanitize_string(title)
-
     title = remove_markdown_in_title(title)
+    first_line = title.split("\n")[0].strip()
 
-    f_title = truncate_title(
-        title.split("\n")[0].strip(), runtime_settings["max_title_length"]
-    )
-    scene_info = f" ({scene_index})" if scene_index > 0 else ""
+    if len(first_line) == 0:
+        return f"{prefix}{scene_info}"
 
-    if len(f_title) <= 5:
-        return f"{f_title} - {date}{scene_info}"
+    # Calculate available space for the text portion
+    overhead = len(prefix) + len(" - ") + len(scene_info)
+    available = runtime_settings["max_title_length"] - overhead
+    f_title = truncate_title(first_line, max(available, 10))
 
-    if not bool(re.search("[A-Za-z0-9]", f_title)):
-        if scene_index == 0:
-            title_max_len = runtime_settings["max_title_length"] - 13
-        else:
-            title_max_len = (
-                runtime_settings["max_title_length"] - 16 - len(str(scene_index))
-            )
-        t_title = truncate_title(f_title, title_max_len)
-        scene_info = f" ({scene_index})" if scene_index > 0 else ""
-        return f"{t_title} - {date}{scene_info}"
-
-    scene_info = f" {scene_index}/{scene_count}" if scene_index > 0 else ""
-    return f"{f_title}{scene_info}"
+    return f"{prefix} - {f_title}{scene_info}"
 
 
 def process_db_row_scene_files(
@@ -997,7 +995,7 @@ def process_db_row_scene_files(
     if sleep:
         time_to_sleep = rng.uniform(0, 3)
         time.sleep(time_to_sleep)
-    stash = StashInterface(runtime_settings["stashapp"])
+    stash = StashInterface(runtime_settings["stashapp"], verify_ssl=False)
     file_logger.log(5, "%s", pformat(f"Count of rows in this loop: {len(rows)}"))
     file_logger.log(5, "%s", pformat(f"Rows: {rows}"))
     if len(rows) == 0:
@@ -1075,7 +1073,7 @@ def process_db_row_scene_files(
         if row["text"]:
             row["text"] = unescape(row["text"]).replace("<br /> ", "\n")
             row["text"] = re.sub(r"<[^>]*>", "", row["text"])
-        file_id = row["studio_code"]
+        file_id = row.get("studio_code")
         if file_id is None:
             continue
         row["scene"] = []
@@ -1125,7 +1123,7 @@ async def get_medias_from_db(
 
     before = kwargs.get("before", None)
     after = kwargs.get("after", None)
-    date_template = " AND {table}.created_at {date}"
+    date_template = " AND COALESCE({table}.created_at, medias.created_at) {date}"
     if before or after:
         date_filters = ""
         if before:
@@ -1169,7 +1167,7 @@ async def get_medias_from_db(
         total=total_pages, desc=f"{username} {api_type} - Adding Tasks", position=1
     )
     base_sql_command = base_sql_template.format(
-        select_columns="medias.filename, medias.downloaded, medias.post_id, medias.media_id, medias.api_type, {table}.text, {table}.created_at, medias.link, medias.linked",
+        select_columns="medias.filename, medias.downloaded, medias.post_id, medias.media_id, medias.api_type, COALESCE({table}.text, '') as text, COALESCE({table}.created_at, medias.created_at) as created_at, medias.link, medias.linked",
         join_options="LEFT JOIN {table} ON medias.post_id = {table}.post_id",
         media_type=media_type,
         api_types=api_types,
@@ -1223,6 +1221,42 @@ async def group_medias_by_post_id(
             pprint(media)
             continue
     return grouped_medias
+
+
+def annotate_reposts(
+    grouped_medias: dict[any, list[dict[str, any]]], username: str
+) -> None:
+    """Detect media_ids that appear in multiple posts and annotate them.
+
+    For each media item that is a repost (same media_id in another post),
+    adds a 'repost_of' key with the list of other post_ids containing the
+    same media.
+    """
+    # Build media_id -> [post_ids] mapping
+    media_id_posts: dict[any, list[any]] = {}
+    for post_id, media_list in grouped_medias.items():
+        for media in media_list:
+            mid = media.get("media_id")
+            if mid is not None:
+                if mid not in media_id_posts:
+                    media_id_posts[mid] = []
+                media_id_posts[mid].append(post_id)
+    # Annotate medias that share a media_id across posts
+    repost_count = 0
+    for post_id, media_list in grouped_medias.items():
+        for media in media_list:
+            mid = media.get("media_id")
+            if mid is not None and len(media_id_posts.get(mid, [])) > 1:
+                other_posts = [
+                    pid for pid in media_id_posts[mid] if pid != post_id
+                ]
+                if other_posts:
+                    media["repost_of"] = other_posts
+                    repost_count += 1
+    if repost_count > 0:
+        file_logger.info(
+            f"[{username}] Annotated {repost_count} reposted media items"
+        )
 
 
 async def get_post_labels_from_db(
@@ -1345,6 +1379,13 @@ async def create_or_update_image_galleries(
             },
             fragment="""id title details date performers{id} studio{id} code urls tags{id}""",
         )
+        # Collect cross-reference URLs for reposted media in this post
+        gallery_urls = [f"https://onlyfans.com/{post_id}/{username}"]
+        for media in media_list:
+            for ref_post_id in media.get("repost_of", []):
+                ref_url = f"https://onlyfans.com/{ref_post_id}/{username}"
+                if ref_url not in gallery_urls:
+                    gallery_urls.append(ref_url)
         if current_gallery is None or len(current_gallery) == 0:
             current_gallery = {}
             current_gallery["title"] = f"{username} - {post_id}"
@@ -1355,7 +1396,7 @@ async def create_or_update_image_galleries(
                 current_gallery["date"] = media_list[0]["created_at"].strftime(
                     "%Y-%m-%d"
                 )
-            current_gallery["urls"] = [f"https://onlyfans.com/{post_id}/{username}"]
+            current_gallery["urls"] = gallery_urls
             current_gallery["studio_id"] = performer_studio["id"]
             current_gallery["tag_ids"] = tags
             file_logger.log(10, "%s", pformat(f"Create Gallery: {current_gallery}"))
@@ -1372,20 +1413,9 @@ async def create_or_update_image_galleries(
             ):
                 differences["details"] = media_list[0]["text"]
             if media_list[0]["created_at"] is not None:
-                if isinstance(media_list[0]["created_at"], str):
-                    if current_gallery[0]["date"] != dateutil.parser.parse(
-                        media_list[0]["created_at"]
-                    ).strftime("%Y-%m-%d"):
-                        differences["date"] = media_list[0]["created_at"]
-                elif isinstance(media_list[0]["created_at"], datetime):
-                    if current_gallery[0]["date"] != media_list[0][
-                        "created_at"
-                    ].strftime("%Y-%m-%d"):
-                        differences["date"] = media_list[0]["created_at"].strftime(
-                            "%Y-%m-%d"
-                        )
-                else:
-                    Raise(ValueError(f"created_at date wrong type: {media_list[0]}"))
+                date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                if current_gallery[0]["date"] != date_str:
+                    differences["date"] = date_str
             else:
                 Raise(ValueError(f"No created_at date: {media_list[0]}"))
             if {"id": performer["id"]} not in current_gallery[0]["performers"]:
@@ -1394,10 +1424,8 @@ async def create_or_update_image_galleries(
                 differences["studio_id"] = performer_studio["id"]
             if current_gallery[0]["code"] != f"{post_id}":
                 differences["code"] = f"{post_id}"
-            if current_gallery[0]["urls"] != [
-                f"https://onlyfans.com/{post_id}/{username}"
-            ]:
-                differences["urls"] = [f"https://onlyfans.com/{post_id}/{username}"]
+            if set(current_gallery[0]["urls"]) != set(gallery_urls):
+                differences["urls"] = gallery_urls
             tag_ids = [tag["id"] for tag in current_gallery[0]["tags"]]
             logger.debug("%s", pformat(f"Tag IDs: {tag_ids}"))
             if tag_ids != tags:
@@ -1451,12 +1479,9 @@ async def create_or_update_image_galleries(
                     else:
                         image_diff["details"] = ""
                     if media_list[0]["created_at"] is not None:
-                        if file["date"] != media_list[0]["created_at"].strftime(
-                            "%Y-%m-%d"
-                        ):
-                            image_diff["date"] = media_list[0]["created_at"].strftime(
-                                "%Y-%m-%d"
-                            )
+                        date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                        if file["date"] != date_str:
+                            image_diff["date"] = date_str
                     else:
                         Raise(ValueError(f"No created_at date: {media_list[0]}"))
                     if performer["id"] not in [p["id"] for p in file["performers"]]:
@@ -1471,10 +1496,14 @@ async def create_or_update_image_galleries(
                         image_diff["studio_id"] = performer_studio["id"]
                     if file["code"] != f"{post_id}":
                         image_diff["code"] = f"{post_id}"
-                    if file["urls"] != [f"https://onlyfans.com/{post_id}/{username}"]:
-                        image_diff["urls"] = [
-                            f"https://onlyfans.com/{post_id}/{username}"
-                        ]
+                    # Build image URLs including cross-references for reposts
+                    image_urls = [f"https://onlyfans.com/{post_id}/{username}"]
+                    for ref_post_id in media.get("repost_of", []):
+                        ref_url = f"https://onlyfans.com/{ref_post_id}/{username}"
+                        if ref_url not in image_urls:
+                            image_urls.append(ref_url)
+                    if set(file.get("urls", [])) != set(image_urls):
+                        image_diff["urls"] = image_urls
                     tag_ids = {tag["id"] for tag in file["tags"]}
                     if tag_ids != set(tags):
                         image_diff["tag_ids"] = tags
@@ -1506,6 +1535,33 @@ async def create_or_update_image_galleries(
     bar.close()
 
 
+async def find_gallery_for_post(
+    post_id, stash, performer
+) -> str | None:
+    """Find an existing gallery for a post_id.
+
+    Only links scenes to galleries that already exist (created by image processing).
+    Does NOT create new galleries for video-only posts, since Stash galleries
+    are image containers and would appear empty.
+
+    Returns the gallery ID, or None if no gallery exists.
+    """
+    current_gallery = stash.find_galleries(
+        f={
+            "code": {"modifier": "EQUALS", "value": f"{post_id}"},
+            "performers": {"modifier": "INCLUDES", "value": [performer["id"]]},
+        },
+        fragment="id",
+    )
+    if current_gallery and len(current_gallery) > 0:
+        gallery_id = current_gallery[0]["id"]
+        file_logger.debug(
+            "%s", pformat(f"Found existing gallery {gallery_id} for post {post_id}")
+        )
+        return gallery_id
+    return None
+
+
 async def update_scene(
     grouped_medias: dict[any, list[dict[str, any]]], **kwargs
 ) -> None:
@@ -1524,6 +1580,8 @@ async def update_scene(
         if len(media_list) == 0:
             file_logger.debug("%s", pformat(f"No media found for {post_id}"))
             continue
+        # Link scene to existing gallery (created by image processing) if one exists
+        gallery_id = await find_gallery_for_post(post_id, stash, performer)
         for media in media_list:
             if "api_type" in media:
                 if media["api_type"] == "Messages":
@@ -1549,26 +1607,22 @@ async def update_scene(
                 for scene in file:
                     differences = {"id": scene["id"]}
                     # scene_id = scene["id"]
-                    if media["text"]:
-                        title_holder = format_title(
-                            scene["title"],
-                            username,
-                            media["created_at"].strftime("%Y-%m-%d"),
-                            media_list.index(media),
-                            len(media_list),
-                        )
-                        if scene["title"] != title_holder:
-                            differences["title"] = title_holder
+                    title_holder = format_title(
+                        media["text"] or "",
+                        username,
+                        media["created_at"].strftime("%Y-%m-%d") if media["created_at"] else "",
+                        media_list.index(media),
+                        len(media_list),
+                    )
+                    if scene["title"] != title_holder:
+                        differences["title"] = title_holder
                     if media_list[0]["text"]:
                         if scene["details"] != media_list[0]["text"]:
                             differences["details"] = media_list[0]["text"]
                     if media_list[0]["created_at"] is not None:
-                        if scene["date"] != media_list[0]["created_at"].strftime(
-                            "%Y-%m-%d"
-                        ):
-                            differences["date"] = media_list[0]["created_at"].strftime(
-                                "%Y-%m-%d"
-                            )
+                        date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                        if scene["date"] != date_str:
+                            differences["date"] = date_str
                     else:
                         Raise(ValueError(f"No created_at date: {media_list[0]}"))
                     if performer["id"] not in [p["id"] for p in scene["performers"]]:
@@ -1583,13 +1637,26 @@ async def update_scene(
                         differences["studio_id"] = performer_studio["id"]
                     if scene["code"] != media["studio_code"]:
                         differences["code"] = media["studio_code"]
-                    if scene["urls"] != [f"https://onlyfans.com/{post_id}/{username}"]:
-                        differences["urls"] = [
-                            f"https://onlyfans.com/{post_id}/{username}"
-                        ]
+                    # Build scene URLs including cross-references for reposts
+                    scene_urls = [f"https://onlyfans.com/{post_id}/{username}"]
+                    for ref_post_id in media.get("repost_of", []):
+                        ref_url = f"https://onlyfans.com/{ref_post_id}/{username}"
+                        if ref_url not in scene_urls:
+                            scene_urls.append(ref_url)
+                    if set(scene.get("urls", [])) != set(scene_urls):
+                        differences["urls"] = scene_urls
                     tag_ids = {tag["id"] for tag in scene["tags"]}
                     if tag_ids != set(tags):
                         differences["tag_ids"] = tags
+                    # Link scene to the post's gallery
+                    if gallery_id is not None:
+                        existing_gallery_ids = {
+                            g["id"] for g in scene.get("galleries", [])
+                        }
+                        if gallery_id not in existing_gallery_ids:
+                            differences["gallery_ids"] = list(
+                                existing_gallery_ids | {gallery_id}
+                            )
                     if len(differences) > 1:
                         file_logger.log(10, "%s", pformat(f"scene (before): {scene}"))
                         file_logger.debug("%s", pformat(f"Differences: {differences}"))
@@ -1604,6 +1671,105 @@ async def update_scene(
                                 await asyncio.sleep(rng.uniform(0, 3))
         bar.update(1)
     bar.close()
+
+
+async def detect_unlocked_not_downloaded(
+    conn: aiosqlite.Connection, username: str
+) -> list[dict]:
+    """Detect media that unlocked after being marked downloaded but was never actually saved.
+
+    These are entries where:
+    - downloaded = 1 (ofscraper skipped them)
+    - filename is NULL or empty (no file was saved)
+    - unlocked = 1 (content is now accessible)
+
+    Returns list of media_ids that need re-downloading.
+    """
+    query = """
+        SELECT media_id, post_id, media_type, api_type, filename, downloaded, unlocked, link
+        FROM medias
+        WHERE downloaded = 1
+          AND (filename IS NULL OR filename = '')
+          AND unlocked = 1
+    """
+    fixable = []
+    locked = []
+    try:
+        async with conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                row_dict = dict(row)
+                fixable.append(row_dict)
+
+        # Also report genuinely locked items (informational only)
+        locked_query = """
+            SELECT media_id, post_id, media_type, api_type, filename, downloaded, unlocked
+            FROM medias
+            WHERE downloaded = 1
+              AND (filename IS NULL OR filename = '')
+              AND (unlocked = 0 OR unlocked IS NULL)
+        """
+        async with conn.execute(locked_query) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                locked.append(dict(row))
+    except sqlite3.Error as e:
+        file_logger.warning(f"Error checking unlock status for {username}: {e}")
+        return []
+
+    if locked:
+        logger.info(
+            f"[{username}] {len(locked)} locked media items (no file, still locked)"
+        )
+        file_logger.info(
+            f"[{username}] Locked media (informational): {pformat(locked)}"
+        )
+
+    if fixable:
+        logger.warning(
+            f"[{username}] {len(fixable)} media items unlocked but never downloaded!"
+        )
+        file_logger.warning(
+            f"[{username}] Unlocked-but-not-downloaded media: {pformat(fixable)}"
+        )
+        # Reset downloaded=0 in the ORIGINAL on-disk database so ofscraper re-downloads
+        db_path = os.path.join(
+            format_directory(
+                dir_type="metadata_format",
+                model_username=username,
+                missing_values="**",
+            ),
+            "user_data.db",
+        )
+        db_paths = glob(db_path, recursive=True)
+        if db_paths:
+            real_db = db_paths[0]
+            media_ids = [row["media_id"] for row in fixable]
+            try:
+                async with aiosqlite.connect(real_db) as disk_conn:
+                    placeholders = ",".join("?" * len(media_ids))
+                    await disk_conn.execute(
+                        f"UPDATE medias SET downloaded = 0 WHERE media_id IN ({placeholders}) "
+                        f"AND (filename IS NULL OR filename = '')",
+                        media_ids,
+                    )
+                    await disk_conn.commit()
+                logger.info(
+                    f"[{username}] Reset downloaded=0 for {len(media_ids)} media items "
+                    f"in {real_db} — next scraper run will download them"
+                )
+                for row in fixable:
+                    logger.info(
+                        f"  media_id={row['media_id']} post_id={row['post_id']} "
+                        f"type={row['media_type']}/{row['api_type']}"
+                    )
+            except Exception as e:
+                logger.error(f"[{username}] Failed to reset downloaded status: {e}")
+                file_logger.exception(e, exc_info=True)
+    else:
+        file_logger.info(f"[{username}] No unlocked-but-not-downloaded media found")
+
+    return fixable
 
 
 async def process_image_files(db_file: aiosqlite.Connection, **kwargs) -> None:
@@ -1668,6 +1834,19 @@ async def process_image_files(db_file: aiosqlite.Connection, **kwargs) -> None:
         logger.info(f"{db_file} - Error: {e}")
         return None
     grouped_medias = await group_medias_by_post_id(medias)
+    # Filter out phantom medias with NULL/empty filenames (locked items auto-marked downloaded)
+    for post_id in list(grouped_medias.keys()):
+        grouped_medias[post_id] = [
+            m for m in grouped_medias[post_id]
+            if m.get("filename") and m["filename"].strip()
+        ]
+        if not grouped_medias[post_id]:
+            del grouped_medias[post_id]
+    # Sort each group by media_id for deterministic image ordering
+    for post_id in grouped_medias:
+        grouped_medias[post_id].sort(key=lambda m: m["media_id"])
+    # Annotate reposts (same media_id across different posts)
+    annotate_reposts(grouped_medias, username)
     gathered_tags: dict = await gather_model_labels(db_file, stash)
     file_logger.log(5, "%s", pformat(f"Gathered Tags: {gathered_tags}"))
     file_logger.log(5, "%s", pformat(f"Grouped Medias: {grouped_medias}"))
@@ -1742,6 +1921,19 @@ async def process_scene_files(db_file: aiosqlite.Connection, **kwargs) -> None:
         logger.info(f"{db_file} - Error: {e}")
         return None
     grouped_medias = await group_medias_by_post_id(medias)
+    # Filter out phantom medias with NULL/empty filenames (locked items auto-marked downloaded)
+    for post_id in list(grouped_medias.keys()):
+        grouped_medias[post_id] = [
+            m for m in grouped_medias[post_id]
+            if m.get("filename") and m["filename"].strip()
+        ]
+        if not grouped_medias[post_id]:
+            del grouped_medias[post_id]
+    # Sort each group by media_id for deterministic scene ordering
+    for post_id in grouped_medias:
+        grouped_medias[post_id].sort(key=lambda m: m["media_id"])
+    # Annotate reposts (same media_id across different posts)
+    annotate_reposts(grouped_medias, username)
     gathered_tags: dict = await gather_model_labels(db_file, stash)
     file_logger.log(5, "%s", pformat(f"Gathered Tags: {gathered_tags}"))
     file_logger.log(5, "%s", pformat(f"Grouped Medias: {grouped_medias}"))
@@ -1897,7 +2089,7 @@ async def main() -> None:
     )
     file_logger.debug("%s", pformat(metadata_db_sets))
     try:
-        stash = StashInterface(runtime_settings["stashapp"])
+        stash = StashInterface(runtime_settings["stashapp"], verify_ssl=False)
     except SystemExit:
         logger.error("Failed to connect to Stash")
         loop = asyncio.get_running_loop()
@@ -1946,6 +2138,8 @@ async def main() -> None:
             logger.info(f"Processing performer: {username}")
             file_logger.info(f"Starting scan of {username}'s OF site directory")
             await scan_performer_directory(username, stash)
+            # Detect media that unlocked since last scrape but was never downloaded
+            await detect_unlocked_not_downloaded(db_file, username)
             if args.images_only:
                 await process_image_files(
                     db_file,
@@ -1977,7 +2171,7 @@ async def main() -> None:
             await generate_metadata(stash=stash, await_loop=True)
     except Exception as e:
         logger.exception(e, exc_info=True, stack_info=True)
-        return
+        raise
     finally:
         for conn in metadata_db_files:
             await conn.close()
