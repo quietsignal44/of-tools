@@ -147,6 +147,21 @@ def convert_datetime(val: bytes) -> datetime:
     return datetime.fromisoformat(val.decode())
 
 
+def to_date_str(val) -> str:
+    """Convert a datetime or ISO string to 'YYYY-MM-DD' date string.
+
+    Handles both datetime objects (from SQLite type converters) and raw
+    ISO 8601 strings (from COALESCE expressions that bypass converters).
+    """
+    if val is None:
+        return ""
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, str):
+        return val[:10]  # ISO 8601: 'YYYY-MM-DDTHH:MM:SS...' → 'YYYY-MM-DD'
+    return str(val)[:10]
+
+
 # Stolen from https://stackoverflow.com/a/46890853 with some added type casting
 def deep_get(
     dictionary: dict, keys: str, default: type[ValueError] | None = None
@@ -1393,9 +1408,7 @@ async def create_or_update_image_galleries(
             current_gallery["performer_ids"] = [performer["id"]]
             current_gallery["code"] = f"{post_id}"
             if media_list[0]["created_at"] is not None:
-                current_gallery["date"] = media_list[0]["created_at"].strftime(
-                    "%Y-%m-%d"
-                )
+                current_gallery["date"] = to_date_str(media_list[0]["created_at"])
             current_gallery["urls"] = gallery_urls
             current_gallery["studio_id"] = performer_studio["id"]
             current_gallery["tag_ids"] = tags
@@ -1413,7 +1426,7 @@ async def create_or_update_image_galleries(
             ):
                 differences["details"] = media_list[0]["text"]
             if media_list[0]["created_at"] is not None:
-                date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                date_str = to_date_str(media_list[0]["created_at"])
                 if current_gallery[0]["date"] != date_str:
                     differences["date"] = date_str
             else:
@@ -1479,7 +1492,7 @@ async def create_or_update_image_galleries(
                     else:
                         image_diff["details"] = ""
                     if media_list[0]["created_at"] is not None:
-                        date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                        date_str = to_date_str(media_list[0]["created_at"])
                         if file["date"] != date_str:
                             image_diff["date"] = date_str
                     else:
@@ -1610,7 +1623,7 @@ async def update_scene(
                     title_holder = format_title(
                         media["text"] or "",
                         username,
-                        media["created_at"].strftime("%Y-%m-%d") if media["created_at"] else "",
+                        to_date_str(media["created_at"]) if media["created_at"] else "",
                         media_list.index(media),
                         len(media_list),
                     )
@@ -1620,7 +1633,7 @@ async def update_scene(
                         if scene["details"] != media_list[0]["text"]:
                             differences["details"] = media_list[0]["text"]
                     if media_list[0]["created_at"] is not None:
-                        date_str = media_list[0]["created_at"].strftime("%Y-%m-%d")
+                        date_str = to_date_str(media_list[0]["created_at"])
                         if scene["date"] != date_str:
                             differences["date"] = date_str
                     else:
